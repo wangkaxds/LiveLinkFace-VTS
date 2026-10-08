@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 
 from bridge import Bridge, Settings, Storage
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 ORIENTATION_CHOICES = {
     "portrait": "竖屏 / 不补偿",
     "landscape_left": "横屏 · 镜头在左",
@@ -49,6 +49,14 @@ HELP = """第一次接入
 4. 正对手机，保持普通坐姿并目视正中，点击「头部与视线归零」。
    当前头部姿势和左右眼视线会成为正中位置；眨眼开合不受归零影响。
    然后根据自己的模型调头部、嘴巴和眨眼幅度。
+
+平滑调节
+
+• 在「实时数值与调节 → 动作响应」中，分别调整「整体平滑」和「眨眼平滑」。
+  数值越大越平滑，越小响应越快；设为 0 关闭对应平滑，修改后立即生效。
+• 整体平滑默认 100 ms，作用于头部、视线等；嘴巴平滑最多 25 ms。
+  眨眼平滑默认 20 ms，单独控制左右眼开合，不随整体平滑变化。
+  旧设置中的整体平滑数值会保留；滑块调整后自动保存。
 
 横放手机（旧版横屏面捕适配）
 
@@ -105,7 +113,7 @@ class App:
         width = min(960, max(640, self.root.winfo_screenwidth() - 80))
         height = min(780, max(560, self.root.winfo_screenheight() - 90))
         self.root.geometry(f"{width}x{height}+40+10")
-        self.root.minsize(min(880, width), min(720, height))
+        self.root.minsize(min(880, width), height)
         self.root.configure(bg="#151c25")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._style()
@@ -260,10 +268,10 @@ class App:
         for key, label, low, high in (
             ("head_gain", "头部幅度", 0.1, 3), ("mouth_gain", "张嘴幅度", 0.1, 4),
             ("blink_gain", "闭眼幅度", 0.1, 3), ("eye_gain", "视线幅度", 0.1, 3),
-            ("smoothing_ms", "平滑时间", 0, 250),
+            ("smoothing_ms", "整体平滑", 0, 250), ("blink_smoothing_ms", "眨眼平滑", 0, 120),
         ):
             row = ttk.Frame(right)
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=1)
             ttk.Label(row, text=label, width=9).pack(side="left")
             variable = tk.DoubleVar(value=getattr(self.settings, key))
             number = tk.StringVar()
@@ -272,7 +280,7 @@ class App:
             slider = ttk.Scale(row, from_=low, to=high, variable=variable, length=170, command=lambda _, k=key: self.tune(k))
             slider.pack(side="left", fill="x", expand=True, padx=(6, 10))
             self.tune(key)
-        ttk.Label(right, text="平滑越低，响应越快；眨眼有独立的快速平滑。", style="Muted.TLabel", wraplength=375).pack(anchor="w", pady=(2, 4))
+        ttk.Label(right, text="越大越平滑；眨眼开合单独调节。", style="Muted.TLabel", wraplength=375).pack(anchor="w", pady=(2, 4))
         self.switches = {}
         switches_frame = ttk.Frame(right)
         switches_frame.pack(fill="x")
@@ -286,7 +294,7 @@ class App:
 
     def tune(self, key):
         variable, number = self.tuning[key]
-        number.set(f"{variable.get():.0f} ms" if key == "smoothing_ms" else f"{variable.get():.2f}×")
+        number.set(f"{variable.get():.0f} ms" if key.endswith("_ms") else f"{variable.get():.2f}×")
         self.changed()
 
     def read_settings(self) -> Settings:

@@ -135,9 +135,43 @@ class MappingTests(unittest.TestCase):
             results.append(result["FaceAngleX"])
         self.assertAlmostEqual(results[0], results[1], places=8)
         mapper = Mapper()
-        mapper.map(frame(), Settings(smoothing_ms=250), 0)
-        result = mapper.map(frame({"EyeBlinkLeft": 1}), Settings(smoothing_ms=250), 0.03)
+        mapper.map(frame(), Settings(smoothing_ms=250, blink_smoothing_ms=8), 0)
+        result = mapper.map(frame({"EyeBlinkLeft": 1}), Settings(smoothing_ms=250, blink_smoothing_ms=8), 0.03)
         self.assertLess(result["EyeOpenLeft"], 0.03)
+
+    def test_blink_smoothing_is_adjustable_independently_of_head_smoothing(self):
+        results = []
+        for blink_ms in (0, 40):
+            mapper = Mapper()
+            settings = Settings(smoothing_ms=100, blink_smoothing_ms=blink_ms)
+            mapper.map(frame(), settings, 0)
+            results.append(mapper.map(frame({"HeadYaw": math.radians(20), "EyeBlinkLeft": 1}), settings, 0.03))
+        self.assertEqual(results[0]["EyeOpenLeft"], 0)
+        self.assertGreater(results[1]["EyeOpenLeft"], 0.4)
+        self.assertLess(results[1]["EyeOpenLeft"], 0.55)
+        self.assertAlmostEqual(results[0]["FaceAngleX"], results[1]["FaceAngleX"])
+        self.assertGreater(results[0]["FaceAngleX"], 0)
+        self.assertLess(results[0]["FaceAngleX"], 8)
+
+    def test_blink_smoothing_is_consistent_across_frame_rates(self):
+        results = []
+        for rate in (30, 60, 120):
+            mapper = Mapper()
+            settings = Settings(blink_smoothing_ms=50)
+            mapper.map(frame(), settings, 0)
+            for i in range(1, rate // 10 + 1):
+                result = mapper.map(frame({"EyeBlinkLeft": 1}), settings, i / rate)
+            results.append(result["EyeOpenLeft"])
+        for value in results[1:]:
+            self.assertAlmostEqual(value, results[0], places=8)
+
+    def test_default_smoothing_reduces_head_jitter_while_retaining_a_fast_blink(self):
+        mapper = Mapper()
+        mapper.map(frame(), Settings(), 0)
+        result = mapper.map(frame({"HeadYaw": math.radians(20), "EyeBlinkLeft": 1}), Settings(), 1 / 30)
+        self.assertGreater(result["FaceAngleX"], 0)
+        self.assertLess(result["FaceAngleX"], 8)
+        self.assertLess(result["EyeOpenLeft"], 0.3)
 
     def test_extreme_blendshapes_cannot_escape_ranges(self):
         result = Mapper().map(frame({k: 10000 for k in BLENDSHAPES}), Settings(), 1)
@@ -292,6 +326,19 @@ class CalibrationTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_blink_smoothing_persists_and_older_settings_get_the_new_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            (storage.directory / "settings.json").write_text('{"smoothing_ms": 55}', encoding="utf-8")
+            loaded = storage.load_settings()
+            self.assertEqual(loaded.smoothing_ms, 55)
+            self.assertEqual(loaded.blink_smoothing_ms, 20)
+            storage.save_settings(replace(loaded, blink_smoothing_ms=40))
+            self.assertEqual(storage.load_settings().blink_smoothing_ms, 40)
+            for invalid in (-1, 121, math.nan, math.inf):
+                with self.assertRaises(ValueError):
+                    replace(loaded, blink_smoothing_ms=invalid).validate()
+
     def test_gaze_zero_persists_and_old_settings_default_to_uncalibrated(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory))

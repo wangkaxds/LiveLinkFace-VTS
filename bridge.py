@@ -110,7 +110,8 @@ class Settings:
     udp_port: int = 11111
     vts_port: int = 8001
     fps: int = 60
-    smoothing_ms: float = 35.0
+    smoothing_ms: float = 100.0
+    blink_smoothing_ms: float = 20.0
     head_gain: float = 1.0
     mouth_gain: float = 1.5
     blink_gain: float = 1.2
@@ -133,7 +134,7 @@ class Settings:
                 raise ValueError("端口必须是 1–65535 的整数")
         if type(self.fps) is not int or not 15 <= self.fps <= 120:
             raise ValueError("发送帧率必须是 15–120 的整数")
-        limits = {"smoothing_ms": (0, 250), "head_gain": (0.1, 3),
+        limits = {"smoothing_ms": (0, 250), "blink_smoothing_ms": (0, 120), "head_gain": (0.1, 3),
                   "mouth_gain": (0.1, 4), "blink_gain": (0.1, 3), "eye_gain": (0.1, 3)}
         for name, (low, high) in limits.items():
             value = getattr(self, name)
@@ -243,10 +244,10 @@ class Mapper:
         dt = max(0.0, now - self.last_time) if self.last_time is not None else None
         self.last_time = now
         for key, value in result.items():
-            # Blink and lip smoothing have shorter time constants to retain detail.
+            # Blinks have an independent time constant; lips retain a short cap.
             tau = settings.smoothing_ms / 1000
             if key.startswith("EyeOpen"):
-                tau = min(tau, 0.008)
+                tau = settings.blink_smoothing_ms / 1000
             elif key.startswith("Mouth"):
                 tau = min(tau, 0.025)
             if dt is not None and tau > 0 and key in self.previous:
