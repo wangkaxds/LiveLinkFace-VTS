@@ -95,6 +95,16 @@ def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
 
 
+def eye_direction(values: dict[str, float], side: str) -> tuple[float, float]:
+    """Physical eye direction before calibration, gain, inversion, or eye swap."""
+    shape = lambda key: clamp(values.get(key, 0.0))
+    x = shape(f"EyeLookOut{side}") - shape(f"EyeLookIn{side}")
+    if side == "Right":
+        x = -x
+    y = shape(f"EyeLookUp{side}") - shape(f"EyeLookDown{side}")
+    return x, y
+
+
 @dataclass(frozen=True)
 class Settings:
     udp_port: int = 11111
@@ -112,6 +122,7 @@ class Settings:
     invert_gaze: bool = False
     demo: bool = False
     head_zero: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gaze_zero: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def validate(self) -> None:
         for port in (self.udp_port, self.vts_port):
@@ -127,6 +138,8 @@ class Settings:
                 raise ValueError(f"{name} 超出允许范围")
         if len(self.head_zero) != 3 or not all(math.isfinite(v) for v in self.head_zero):
             raise ValueError("头部校准值无效")
+        if len(self.gaze_zero) != 4 or not all(math.isfinite(v) for v in self.gaze_zero):
+            raise ValueError("视线校准值无效")
 
 
 class Storage:
@@ -207,13 +220,14 @@ class Mapper:
         for target_side in ("Left", "Right"):
             side = ("Right" if target_side == "Left" else "Left") if settings.swap_eyes else target_side
             result[f"EyeOpen{target_side}"] = clamp(1.0 - shape(f"EyeBlink{side}") * settings.blink_gain + 0.2 * shape(f"EyeWide{side}"))
-            gaze_x = shape(f"EyeLookOut{side}") - shape(f"EyeLookIn{side}")
-            if side == "Right":
-                gaze_x = -gaze_x
+            gaze_x, gaze_y = eye_direction(v, side)
+            offset = 0 if side == "Left" else 2
+            gaze_x -= settings.gaze_zero[offset]
+            gaze_y -= settings.gaze_zero[offset + 1]
             if settings.invert_gaze:
                 gaze_x = -gaze_x
             result[f"Eye{target_side}X"] = clamp(gaze_x * settings.eye_gain, -1, 1)
-            result[f"Eye{target_side}Y"] = clamp((shape(f"EyeLookUp{side}") - shape(f"EyeLookDown{side}")) * settings.eye_gain, -1, 1)
+            result[f"Eye{target_side}Y"] = clamp(gaze_y * settings.eye_gain, -1, 1)
         dt = max(0.0, now - self.last_time) if self.last_time is not None else None
         self.last_time = now
         for key, value in result.items():
@@ -371,10 +385,12 @@ class Bridge:
             if self.latest is None or time.monotonic() - self.latest[1] > 1:
                 raise ValueError("还没有实时手机数据，请先连接手机")
             v = self.latest[0].values
-            self.settings = replace(self.settings, head_zero=tuple(v[k] for k in ("HeadYaw", "HeadPitch", "HeadRoll")))
+            self.settings = replace(self.settings,
+                                    head_zero=tuple(v[k] for k in ("HeadYaw", "HeadPitch", "HeadRoll")),
+                                    gaze_zero=(*eye_direction(v, "Left"), *eye_direction(v, "Right")))
             self.reset_mapper = True
             settings = self.settings
-        self.log("头部已归零；坐姿或手机位置改变时可再次归零")
+        self.log("头部与视线已归零；坐姿或手机位置改变时可再次归零")
         return settings
 
     def start(self) -> None:

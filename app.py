@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 
 from bridge import Bridge, Settings, Storage
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 
 def local_addresses() -> list[str]:
@@ -40,7 +40,8 @@ HELP = """第一次接入
    VTS 弹出授权时，对 LiveLink Face to VTS 点击「允许」。
    手机数据和 VTS 两项均正常后，模型就能接收面捕输入。
 
-4. 正对手机，保持普通坐姿，点击「头部归零」。
+4. 正对手机，保持普通坐姿并目视正中，点击「头部与视线归零」。
+   当前头部姿势和左右眼视线会成为正中位置；眨眼开合不受归零影响。
    然后根据自己的模型调头部、嘴巴和眨眼幅度。
 
 接不上时
@@ -228,7 +229,7 @@ class App:
             self.meters[key] = (number, progress, low, high)
         calibrate = ttk.Frame(left)
         calibrate.pack(fill="x", pady=(12, 4))
-        ttk.Button(calibrate, text="头部归零", command=self.calibrate).pack(side="left")
+        ttk.Button(calibrate, text="头部与视线归零", command=self.calibrate).pack(side="left")
         ttk.Button(calibrate, text="清除归零", command=self.clear_zero).pack(side="left", padx=(8, 0))
 
         ttk.Label(right, text="动作响应", style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
@@ -315,14 +316,14 @@ class App:
             self.settings = self.engine.calibrate()
             self.save()
         except ValueError as exc:
-            messagebox.showinfo("头部归零", str(exc))
+            messagebox.showinfo("头部与视线归零", str(exc))
 
     def clear_zero(self):
-        self.settings = replace(self.settings, head_zero=(0.0, 0.0, 0.0))
+        self.settings = replace(self.settings, head_zero=(0.0, 0.0, 0.0), gaze_zero=(0.0, 0.0, 0.0, 0.0))
         self.engine.update_settings(self.settings)
         with self.engine.lock:
             self.engine.reset_mapper = True
-        self.engine.log("已清除头部归零")
+        self.engine.log("已清除头部与视线归零")
         self.save()
 
     def copy_ip(self):

@@ -147,7 +147,92 @@ class MappingTests(unittest.TestCase):
         self.assertTrue(-30 <= result["FaceAngleX"] <= 30)
 
 
+class CalibrationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.storage = Storage(Path(self.directory.name))
+        self.neutral = frame({
+            "HeadYaw": 0.2, "HeadPitch": -0.1, "HeadRoll": 0.05,
+            "EyeLookOutLeft": 0.35, "EyeLookDownLeft": 0.4,
+            "EyeLookInRight": 0.25, "EyeLookDownRight": 0.2,
+            "EyeBlinkLeft": 0.4, "EyeBlinkRight": 0.2,
+        })
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_calibration_centers_head_and_both_eyes_without_changing_blinks(self):
+        engine = Bridge(Settings(smoothing_ms=0, eye_gain=2, swap_eyes=True, invert_gaze=True), self.storage)
+        now = time.monotonic()
+        engine.latest = self.neutral, now
+        before, _ = engine._mapped(now)
+        engine.calibrate()
+        after, valid = engine._mapped(time.monotonic())
+        self.assertTrue(valid)
+        for key in ("FaceAngleX", "FaceAngleY", "FaceAngleZ", "EyeLeftX", "EyeLeftY", "EyeRightX", "EyeRightY"):
+            self.assertAlmostEqual(after[key], 0)
+        for key in ("EyeOpenLeft", "EyeOpenRight"):
+            self.assertEqual(after[key], before[key])
+
+    def test_eye_movement_remains_relative_to_the_saved_neutral_pose(self):
+        engine = Bridge(Settings(smoothing_ms=0), self.storage)
+        engine.latest = self.neutral, time.monotonic()
+        engine.calibrate()
+        moved = dict(self.neutral.values)
+        moved.update({"EyeLookOutLeft": 0.45, "EyeLookUpLeft": 0.2,
+                      "EyeLookInRight": 0.35, "EyeLookUpRight": 0.1,
+                      "EyeBlinkLeft": 1, "EyeBlinkRight": 0, "HeadYaw": 0.3})
+        engine.latest = frame(moved), time.monotonic()
+        after, _ = engine._mapped(time.monotonic())
+        self.assertAlmostEqual(after["EyeLeftX"], 0.1)
+        self.assertAlmostEqual(after["EyeLeftY"], 0.2)
+        self.assertAlmostEqual(after["EyeRightX"], 0.1)
+        self.assertAlmostEqual(after["EyeRightY"], 0.1)
+        self.assertEqual(after["EyeOpenLeft"], 0)
+        self.assertEqual(after["EyeOpenRight"], 1)
+        self.assertAlmostEqual(after["FaceAngleX"], math.degrees(0.1))
+        engine.update_settings(replace(engine.settings, eye_gain=2, swap_eyes=True, invert_gaze=True))
+        after, _ = engine._mapped(time.monotonic())
+        self.assertAlmostEqual(after["EyeLeftX"], -0.2)
+        self.assertAlmostEqual(after["EyeLeftY"], 0.2)
+        self.assertAlmostEqual(after["EyeRightX"], -0.2)
+        self.assertAlmostEqual(after["EyeRightY"], 0.4)
+
+    def test_calibration_discards_previous_smoothing_offsets(self):
+        engine = Bridge(Settings(smoothing_ms=200), self.storage)
+        now = time.monotonic()
+        engine.latest = self.neutral, now
+        engine._mapped(now)
+        engine.calibrate()
+        after, _ = engine._mapped(now + 0.001)
+        self.assertEqual(after["EyeLeftX"], 0)
+        self.assertEqual(after["EyeLeftY"], 0)
+
+    def test_calibration_requires_a_recent_phone_frame(self):
+        engine = Bridge(Settings(), self.storage)
+        for latest in (None, (self.neutral, time.monotonic() - 2)):
+            engine.latest = latest
+            with self.assertRaises(ValueError):
+                engine.calibrate()
+        self.assertEqual(engine.settings, Settings())
+
+
 class StorageTests(unittest.TestCase):
+    def test_gaze_zero_persists_and_old_settings_default_to_uncalibrated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            (storage.directory / "settings.json").write_text(
+                json.dumps({"head_zero": [0.1, 0.2, 0.3]}), encoding="utf-8")
+            loaded = storage.load_settings()
+            self.assertEqual(tuple(loaded.head_zero), (0.1, 0.2, 0.3))
+            self.assertEqual(tuple(loaded.gaze_zero), (0, 0, 0, 0))
+            calibrated = replace(loaded, gaze_zero=(0.2, -0.3, 0.4, -0.5))
+            storage.save_settings(calibrated)
+            self.assertEqual(tuple(storage.load_settings().gaze_zero), calibrated.gaze_zero)
+            for invalid in ((0, 0), (0, 0, math.nan, 0), (0, 0, 0, math.inf)):
+                with self.assertRaises(ValueError):
+                    replace(calibrated, gaze_zero=invalid).validate()
+
     def test_default_storage_works_when_localappdata_is_denied(self):
         with tempfile.TemporaryDirectory() as directory:
             program = Path(directory) / "portable-tool"
