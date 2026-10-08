@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+build/
+*.spec
+dist/
+test-results/
+data/
+source-*-test.json
+*.log
+
+# Local troubleshooting captures and abandoned executable packaging scripts.
+/capture_phone_packet.py
+/diagnose_connection.py
+/verify_ui.py
+/build.ps1
+/requirements-dev.txt
+/licenses/PyInstaller-COPYING.txt

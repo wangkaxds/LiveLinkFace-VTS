@@ -1,0 +1,8 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+# Preserve the launcher's CRLF bytes in GitHub ZIP downloads.
+*.bat -text whitespace=cr-at-eol
+# Upstream license texts are preserved verbatim.
+licenses/* -whitespace
