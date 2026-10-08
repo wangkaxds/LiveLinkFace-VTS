@@ -125,6 +125,7 @@ class Settings:
     demo: bool = False
     head_zero: tuple[float, float, float] = (0.0, 0.0, 0.0)
     gaze_zero: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    blink_zero: tuple[float, float] = (0.0, 0.0)
 
     def validate(self) -> None:
         if self.phone_orientation not in ("portrait", "landscape_left", "landscape_right", "upside_down"):
@@ -144,6 +145,9 @@ class Settings:
             raise ValueError("头部校准值无效")
         if len(self.gaze_zero) != 4 or not all(math.isfinite(v) for v in self.gaze_zero):
             raise ValueError("视线校准值无效")
+        if len(self.blink_zero) != 2 or not all(isinstance(v, (float, int)) and math.isfinite(v) and 0 <= v < 0.9
+                                              for v in self.blink_zero):
+            raise ValueError("眼睛开合校准值无效")
 
 
 class Storage:
@@ -232,7 +236,10 @@ class Mapper:
         })
         for target_side in ("Left", "Right"):
             side = ("Right" if target_side == "Left" else "Left") if settings.swap_eyes else target_side
-            result[f"EyeOpen{target_side}"] = clamp(1.0 - shape(f"EyeBlink{side}") * settings.blink_gain + 0.2 * shape(f"EyeWide{side}"))
+            baseline = settings.blink_zero[0 if side == "Left" else 1]
+            # Normalize the remaining range so a calibrated eye can still close fully.
+            blink = clamp((shape(f"EyeBlink{side}") - baseline) / (1.0 - baseline))
+            result[f"EyeOpen{target_side}"] = clamp(1.0 - blink * settings.blink_gain + 0.2 * shape(f"EyeWide{side}"))
             gaze_x, gaze_y = eye_direction(v, side)
             offset = 0 if side == "Left" else 2
             gaze_x -= settings.gaze_zero[offset]
@@ -393,7 +400,7 @@ class Bridge:
         with self.lock:
             if settings.phone_orientation != self.settings.phone_orientation:
                 self.reset_mapper = True
-                self.log("手机方向补偿已更改；摆好手机后请点击「头部与视线归零」")
+                self.log("手机方向补偿已更改；摆好手机后请点击「校准」")
             self.settings = settings
 
     def calibrate(self) -> Settings:
@@ -401,12 +408,16 @@ class Bridge:
             if self.latest is None or time.monotonic() - self.latest[1] > 1:
                 raise ValueError("还没有实时手机数据，请先连接手机")
             v = self.latest[0].values
+            blink_zero = tuple(clamp(v.get(f"EyeBlink{side}", 0.0)) for side in ("Left", "Right"))
+            if any(value >= 0.9 for value in blink_zero):
+                raise ValueError("请自然睁开双眼、看向正中后再点击校准")
             self.settings = replace(self.settings,
                                     head_zero=tuple(v[k] for k in ("HeadYaw", "HeadPitch", "HeadRoll")),
-                                    gaze_zero=(*eye_direction(v, "Left"), *eye_direction(v, "Right")))
+                                    gaze_zero=(*eye_direction(v, "Left"), *eye_direction(v, "Right")),
+                                    blink_zero=blink_zero)
             self.reset_mapper = True
             settings = self.settings
-        self.log("头部与视线已归零；坐姿或手机位置改变时可再次归零")
+        self.log("已校准头部、视线与眼睛开合；坐姿或手机位置改变时可重新校准")
         return settings
 
     def start(self) -> None:

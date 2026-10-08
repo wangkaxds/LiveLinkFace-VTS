@@ -219,7 +219,8 @@ class OrientationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             neutral = frame({"HeadYaw": 0.2, "HeadPitch": 0.3, "HeadRoll": 1.5,
                              "EyeLookOutLeft": 0.3, "EyeLookDownLeft": 0.2,
-                             "EyeLookInRight": 0.4, "EyeLookUpRight": 0.1, "EyeBlinkLeft": 1})
+                             "EyeLookInRight": 0.4, "EyeLookUpRight": 0.1,
+                             "EyeBlinkLeft": 0.35, "EyeBlinkRight": 0.2})
             for orientation in ("portrait", "landscape_left", "landscape_right", "upside_down"):
                 engine = Bridge(Settings(smoothing_ms=0, phone_orientation=orientation,
                                          swap_eyes=True, invert_gaze=True), Storage(Path(directory)))
@@ -228,7 +229,8 @@ class OrientationTests(unittest.TestCase):
                 mapped, _ = engine._mapped(time.monotonic())
                 for key in ("FaceAngleX", "FaceAngleY", "FaceAngleZ", "EyeLeftX", "EyeLeftY", "EyeRightX", "EyeRightY"):
                     self.assertAlmostEqual(mapped[key], 0)
-                self.assertEqual(mapped["EyeOpenRight"], 0)
+                self.assertEqual(mapped["EyeOpenLeft"], 1)
+                self.assertEqual(mapped["EyeOpenRight"], 1)
 
     def test_orientation_change_resets_smoothing_immediately(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -269,7 +271,7 @@ class CalibrationTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def test_calibration_centers_head_and_both_eyes_without_changing_blinks(self):
+    def test_calibration_centers_head_gaze_and_natural_open_eyes(self):
         engine = Bridge(Settings(smoothing_ms=0, eye_gain=2, swap_eyes=True, invert_gaze=True), self.storage)
         now = time.monotonic()
         engine.latest = self.neutral, now
@@ -280,7 +282,53 @@ class CalibrationTests(unittest.TestCase):
         for key in ("FaceAngleX", "FaceAngleY", "FaceAngleZ", "EyeLeftX", "EyeLeftY", "EyeRightX", "EyeRightY"):
             self.assertAlmostEqual(after[key], 0)
         for key in ("EyeOpenLeft", "EyeOpenRight"):
-            self.assertEqual(after[key], before[key])
+            self.assertLess(before[key], 1)
+            self.assertEqual(after[key], 1)
+        self.assertEqual(engine.settings.blink_zero, (0.4, 0.2))
+
+    def test_eyelid_calibration_keeps_full_closure_and_winks_with_eye_swap_and_gain(self):
+        engine = Bridge(Settings(smoothing_ms=0, blink_smoothing_ms=0, blink_gain=1), self.storage)
+        engine.latest = self.neutral, time.monotonic()
+        engine.calibrate()
+        # Halfway from the natural open-eye baseline to full closure.
+        half_closed = frame({"EyeBlinkLeft": 0.7, "EyeBlinkRight": 0.6})
+        result = Mapper().map(half_closed, engine.settings, 1)
+        self.assertAlmostEqual(result["EyeOpenLeft"], 0.5)
+        self.assertAlmostEqual(result["EyeOpenRight"], 0.5)
+        swapped = replace(engine.settings, swap_eyes=True, blink_gain=1.5)
+        result = Mapper().map(half_closed, swapped, 1)
+        self.assertAlmostEqual(result["EyeOpenLeft"], 0.25)
+        self.assertAlmostEqual(result["EyeOpenRight"], 0.25)
+        for settings in (engine.settings, swapped):
+            wink = Mapper().map(frame({"EyeBlinkLeft": 1, "EyeBlinkRight": 0.2}), settings, 1)
+            closed_side = "Right" if settings.swap_eyes else "Left"
+            open_side = "Left" if settings.swap_eyes else "Right"
+            self.assertEqual(wink[f"EyeOpen{closed_side}"], 0)
+            self.assertEqual(wink[f"EyeOpen{open_side}"], 1)
+            both_closed = Mapper().map(frame({"EyeBlinkLeft": 1, "EyeBlinkRight": 1}), settings, 1)
+            self.assertEqual(both_closed["EyeOpenLeft"], 0)
+            self.assertEqual(both_closed["EyeOpenRight"], 0)
+
+    def test_calibrating_with_closed_eyes_preserves_the_previous_calibration(self):
+        engine = Bridge(Settings(), self.storage)
+        engine.latest = self.neutral, time.monotonic()
+        saved = engine.calibrate()
+        for side in ("Left", "Right"):
+            engine.latest = frame({f"EyeBlink{side}": 1, "HeadYaw": 1}), time.monotonic()
+            with self.assertRaisesRegex(ValueError, "睁.*眼"):
+                engine.calibrate()
+            self.assertEqual(engine.settings, saved)
+
+    def test_repeated_eyelid_calibration_replaces_the_raw_baseline(self):
+        engine = Bridge(Settings(blink_gain=2), self.storage)
+        engine.latest = self.neutral, time.monotonic()
+        engine.calibrate()
+        engine.latest = frame({"EyeBlinkLeft": 0.25, "EyeBlinkRight": 0.5}), time.monotonic()
+        saved = engine.calibrate()
+        self.assertEqual(saved.blink_zero, (0.25, 0.5))
+        after, _ = engine._mapped(time.monotonic())
+        self.assertEqual(after["EyeOpenLeft"], 1)
+        self.assertEqual(after["EyeOpenRight"], 1)
 
     def test_eye_movement_remains_relative_to_the_saved_neutral_pose(self):
         engine = Bridge(Settings(smoothing_ms=0), self.storage)
@@ -326,6 +374,22 @@ class CalibrationTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_eyelid_calibration_persists_and_legacy_settings_keep_the_old_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            (storage.directory / "settings.json").write_text('{"head_zero": [0.1, 0.2, 0.3]}', encoding="utf-8")
+            old = storage.load_settings()
+            self.assertEqual(tuple(old.blink_zero), (0, 0))
+            self.assertEqual(tuple(old.head_zero), (0.1, 0.2, 0.3))
+            before = Mapper().map(frame({"EyeBlinkLeft": 0.5}), old, 1)
+            self.assertAlmostEqual(before["EyeOpenLeft"], 0.4)
+            calibrated = replace(old, blink_zero=(0.4, 0.2))
+            storage.save_settings(calibrated)
+            self.assertEqual(tuple(storage.load_settings().blink_zero), calibrated.blink_zero)
+            for invalid in ((0,), (0, -0.1), (0, 1), (0, math.nan), (0, math.inf)):
+                with self.assertRaises(ValueError):
+                    replace(calibrated, blink_zero=invalid).validate()
+
     def test_blink_smoothing_persists_and_older_settings_get_the_new_default(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory))

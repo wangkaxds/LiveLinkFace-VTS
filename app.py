@@ -14,7 +14,7 @@ from tkinter import messagebox, ttk
 
 from bridge import Bridge, Settings, Storage
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 ORIENTATION_CHOICES = {
     "portrait": "竖屏 / 不补偿",
     "landscape_left": "横屏 · 镜头在左",
@@ -46,8 +46,9 @@ HELP = """第一次接入
    VTS 弹出授权时，对 LiveLink Face to VTS 点击「允许」。
    手机数据和 VTS 两项均正常后，模型就能接收面捕输入。
 
-4. 正对手机，保持普通坐姿并目视正中，点击「头部与视线归零」。
-   当前头部姿势和左右眼视线会成为正中位置；眨眼开合不受归零影响。
+4. 正对手机，保持普通坐姿、自然睁开双眼并目视正中，点击「校准」。
+   当前头部姿势和左右眼视线会成为正中位置，同时记录自然睁眼的基准。
+   校准后仍能完整闭眼或单眼眨眼；不要闭眼或刻意瞪大眼睛进行校准。
    然后根据自己的模型调头部、嘴巴和眨眼幅度。
 
 平滑调节
@@ -62,8 +63,8 @@ HELP = """第一次接入
 
 • 在「动作响应」的「手机方向」中，按面向手机屏幕时的前置镜头位置选择。
   镜头在你的左边选「横屏 · 镜头在左」，右边选「横屏 · 镜头在右」。
-• 手机摆好后，目视正中，重新点击「头部与视线归零」。
-  改变摆放方向或移动手机后需要再次归零。
+• 手机摆好后，自然睁开双眼、目视正中，重新点击「校准」。
+  改变摆放方向或移动手机后需要重新校准。
 • 若手机发送的数据方向本身已正确，保留「竖屏 / 不补偿」。
   眨眼、嘴巴和眼球视线按脸部方向处理；手机方向选项补偿头部转动轴。
 
@@ -252,8 +253,11 @@ class App:
             self.meters[key] = (number, progress, low, high)
         calibrate = ttk.Frame(left)
         calibrate.pack(fill="x", pady=(12, 4))
-        ttk.Button(calibrate, text="头部与视线归零", command=self.calibrate).pack(side="left")
-        ttk.Button(calibrate, text="清除归零", command=self.clear_zero).pack(side="left", padx=(8, 0))
+        self.calibrate_button = ttk.Button(calibrate, text="校准", command=self.calibrate)
+        self.calibrate_button.pack(side="left")
+        self.clear_calibration_button = ttk.Button(calibrate, text="清除校准", command=self.clear_calibration)
+        self.clear_calibration_button.pack(side="left", padx=(8, 0))
+        ttk.Label(calibrate, text="自然睁眼、看向正中", style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
         ttk.Label(right, text="动作响应", style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
         orientation_row = ttk.Frame(right)
@@ -352,14 +356,15 @@ class App:
             self.settings = self.engine.calibrate()
             self.save()
         except ValueError as exc:
-            messagebox.showinfo("头部与视线归零", str(exc))
+            messagebox.showinfo("校准", str(exc))
 
-    def clear_zero(self):
-        self.settings = replace(self.settings, head_zero=(0.0, 0.0, 0.0), gaze_zero=(0.0, 0.0, 0.0, 0.0))
+    def clear_calibration(self):
+        self.settings = replace(self.settings, head_zero=(0.0, 0.0, 0.0), gaze_zero=(0.0, 0.0, 0.0, 0.0),
+                                blink_zero=(0.0, 0.0))
         self.engine.update_settings(self.settings)
         with self.engine.lock:
             self.engine.reset_mapper = True
-        self.engine.log("已清除头部与视线归零")
+        self.engine.log("已清除头部、视线与眼睛开合校准")
         self.save()
 
     def copy_ip(self):
