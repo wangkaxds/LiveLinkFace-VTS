@@ -14,13 +14,15 @@ from tkinter import messagebox, ttk
 
 from bridge import Bridge, Settings, Storage
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 ORIENTATION_CHOICES = {
     "portrait": "竖屏 / 不补偿",
     "landscape_left": "横屏 · 镜头在左",
     "landscape_right": "横屏 · 镜头在右",
     "upside_down": "倒置竖屏 · 镜头在下",
 }
+BLINK_SYNC_CHOICES = {"never": "从不", "always": "总是", "when_turning": "当面部转动时"}
+TRACKING_LOST_CHOICES = {"hold": "保持动作", "idle": "回到待机状态"}
 
 
 def local_addresses() -> list[str]:
@@ -51,13 +53,40 @@ HELP = """第一次接入
    校准后仍能完整闭眼或单眼眨眼；不要闭眼或刻意瞪大眼睛进行校准。
    然后根据自己的模型调头部、嘴巴和眨眼幅度。
 
+眼睛开合调节
+
+•「睁眼灵敏度」越高，模型越容易睁开；低于 1 倍时会缩小睁眼幅度。
+•「眨眼灵敏度」越高，模型越容易闭合；单眼眨眼和闭眼使用同一项。
+•「开合平滑」同时控制睁眼、闭眼和眨眼的平滑程度，默认 8 ms。
+  两个灵敏度可以分别调整，不影响头部和眼球视线。
+•「张嘴灵敏度」调嘴巴开合，「笑容灵敏度」调嘴角与笑眼，
+  「眉毛灵敏度」调挑眉与皱眉的幅度，正常眉毛基准不变。
+
+同步眨眼与面捕丢失
+
+• 同步眨眼「从不」保留单眼动作；「总是」让两眼使用平均开合值。
+  「当面部转动时」在左右侧转至少 15° 时采用较睁开的眼睛联动两眼，
+  减少遮挡导致的误闭眼；回到正面后恢复独立眨眼。
+• 超过 1 秒没有手机有效数据时，「保持动作」持续保持最后一帧，
+  「回到待机状态」释放输入，交给 VTS 的待机动作。点击停止始终释放输入。
+  ARKit UDP 没有人脸存在标志，此选项按有效数据断流判断。
+• 默认同步眨眼「从不」、丢失后「回到待机状态」，兼容旧设置。
+  摄像头 A/B 算法属于 VTS 电脑摄像头；本工具使用手机 ARKit 输入。
+
 平滑调节
 
-• 在「实时数值与调节 → 动作响应」中，分别调整「整体平滑」和「眨眼平滑」。
+• 在「实时数值与调节 → 动作响应」中，分别调整「整体平滑」和「开合平滑」。
   数值越大越平滑，越小响应越快；设为 0 关闭对应平滑，修改后立即生效。
 • 整体平滑默认 100 ms，作用于头部、视线等；嘴巴平滑最多 25 ms。
-  眨眼平滑默认 20 ms，单独控制左右眼开合，不随整体平滑变化。
+  开合平滑默认 8 ms，单独控制左右眼开合，不随整体平滑变化。
   旧设置中的整体平滑数值会保留；滑块调整后自动保存。
+
+保存与恢复默认
+
+• 窗口右下角「保存设置」会立即保存当前调节与校准，重开程序后继续使用。
+  窗口底部会显示保存结果；正常关闭程序时也会保存当前设置。
+•「恢复默认」会恢复灵敏度、幅度、平滑、反向和跟踪选项并保存。
+  保留连接端口、帧率、手机方向与校准；整体平滑 100 ms，开合平滑 8 ms。
 
 横放手机（旧版横屏面捕适配）
 
@@ -137,6 +166,7 @@ class App:
         style.configure("Title.TLabel", font=("Microsoft YaHei UI", 22, "bold"))
         style.configure("Sub.TLabel", font=("Microsoft YaHei UI", 11, "bold"))
         style.configure("TButton", padding=(14, 9), background="#31445a", borderwidth=0)
+        style.configure("Compact.TButton", padding=(10, 3))
         style.map("TButton", background=[("active", "#435e78"), ("disabled", "#253342")],
                   foreground=[("disabled", "#8998a9")])
         style.configure("Accent.TButton", background="#56d4b2", foreground="#102a27")
@@ -157,14 +187,14 @@ class App:
         outer = ttk.Frame(self.root, padding=(24, 16))
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="Live Link Face → VTS", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="接收 iPhone 的 ARKit 面捕数据，实时驱动你的 Live2D。", style="Muted.TLabel").pack(anchor="w", pady=(5, 12))
+        ttk.Label(outer, text="接收 iPhone 的 ARKit 面捕数据，实时驱动你的 Live2D。", style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
 
-        address = ttk.Frame(outer, style="Panel.TFrame", padding=13)
-        address.pack(fill="x", pady=(0, 8))
+        address = ttk.Frame(outer, style="Panel.TFrame", padding=8)
+        address.pack(fill="x", pady=(0, 6))
         self.ip_text = tk.StringVar(value="   ·   ".join(self.addresses) if self.addresses else "未找到局域网 IP，请查看电脑网络设置")
         ttk.Label(address, text="手机目标 IP", style="Panel.TLabel").pack(side="left", padx=(0, 15))
         ttk.Label(address, textvariable=self.ip_text, style="Panel.TLabel", font=("Consolas", 13)).pack(side="left", expand=True, anchor="w")
-        ttk.Button(address, text="复制 IP", command=self.copy_ip).pack(side="right")
+        ttk.Button(address, text="复制 IP", style="Compact.TButton", command=self.copy_ip).pack(side="right")
 
         connection = ttk.Frame(outer)
         connection.pack(fill="x")
@@ -179,12 +209,14 @@ class App:
             ttk.Label(group, text=label).pack(anchor="w", pady=(0, 4))
             entry = ttk.Entry(group, textvariable=variable, width=12)
             entry.pack()
+            entry.bind("<FocusOut>", lambda _: self.changed())
             self.connection_widgets.append(entry)
         group = ttk.Frame(connection)
         group.grid(row=0, column=2, padx=(0, 18), sticky="w")
         ttk.Label(group, text="发送帧率").pack(anchor="w", pady=(0, 4))
         combo = ttk.Combobox(group, textvariable=self.fps_var, values=(30, 60, 90, 120), width=7, state="readonly")
         combo.pack()
+        combo.bind("<<ComboboxSelected>>", lambda _: self.changed())
         self.connection_widgets.append(combo)
         self.demo_check = ttk.Checkbutton(connection, text="模拟动作", variable=self.demo_var)
         self.demo_check.grid(row=0, column=3, padx=(5, 10), sticky="s")
@@ -195,16 +227,24 @@ class App:
         self.stop_button = ttk.Button(connection, text="停止", command=self.stop, state="disabled")
         self.stop_button.grid(row=0, column=5, sticky="se")
 
-        status = ttk.Frame(outer, style="Panel.TFrame", padding=10)
-        status.pack(fill="x", pady=(12, 10))
+        status = ttk.Frame(outer, style="Panel.TFrame", padding=8)
+        status.pack(fill="x", pady=(8, 8))
         self.phone_status = tk.StringVar(value="手机  ·  尚未开始")
         self.vts_status = tk.StringVar(value="VTS   ·  尚未连接")
         self.source_status = tk.StringVar(value="来源 —    收到 0 帧    发送 0 帧")
         ttk.Label(status, textvariable=self.phone_status, style="Panel.TLabel", wraplength=870).pack(anchor="w")
-        ttk.Label(status, textvariable=self.vts_status, style="Panel.TLabel", wraplength=870).pack(anchor="w", pady=4)
+        ttk.Label(status, textvariable=self.vts_status, style="Panel.TLabel", wraplength=870).pack(anchor="w", pady=2)
         ttk.Label(status, textvariable=self.source_status, style="Panel.TLabel", foreground="#aab9c9").pack(anchor="w")
 
-        ttk.Label(outer, text=f"v{VERSION}   ·   本机 VTS API / 局域网 ARKit UDP   ·   无需运行 Unreal Engine", style="Muted.TLabel").pack(side="bottom", anchor="w", pady=(8, 0))
+        footer = ttk.Frame(outer)
+        footer.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Label(footer, text=f"v{VERSION}   ·   局域网面捕 / 本机 VTS", style="Muted.TLabel").pack(side="left")
+        self.restore_defaults_button = ttk.Button(footer, text="恢复默认", style="Compact.TButton", command=self.restore_defaults)
+        self.restore_defaults_button.pack(side="right")
+        self.save_settings_button = ttk.Button(footer, text="保存设置", style="Compact.TButton", command=lambda: self.save(show_error=True))
+        self.save_settings_button.pack(side="right", padx=(0, 8))
+        self.settings_status = tk.StringVar(value="调节后自动保存")
+        ttk.Label(footer, textvariable=self.settings_status, style="Muted.TLabel").pack(side="right", padx=(8, 12))
         notebook = ttk.Notebook(outer)
         notebook.pack(fill="both", expand=True)
         adjust = ttk.Frame(notebook, padding=14)
@@ -230,11 +270,21 @@ class App:
         self.log_text.pack(fill="both", expand=True)
 
     def _adjust(self, parent):
-        parent.columnconfigure(0, weight=1)
-        parent.columnconfigure(1, weight=1)
-        left, right = ttk.Frame(parent), ttk.Frame(parent)
+        parent.columnconfigure(0, weight=1, uniform="adjust")
+        parent.columnconfigure(1, weight=1, uniform="adjust")
+        parent.rowconfigure(0, weight=1)
+        left, right_shell = ttk.Frame(parent), ttk.Frame(parent)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 24))
-        right.grid(row=0, column=1, sticky="nsew")
+        right_shell.grid(row=0, column=1, sticky="nsew")
+        self.adjust_canvas = tk.Canvas(right_shell, bg="#151c25", highlightthickness=0, width=380, yscrollincrement=20)
+        scroll = ttk.Scrollbar(right_shell, orient="vertical", command=self.adjust_canvas.yview)
+        self.adjust_canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.adjust_canvas.pack(side="left", fill="both", expand=True)
+        right = ttk.Frame(self.adjust_canvas)
+        content = self.adjust_canvas.create_window((0, 0), window=right, anchor="nw")
+        right.bind("<Configure>", lambda _: self.adjust_canvas.configure(scrollregion=self.adjust_canvas.bbox("all")))
+        self.adjust_canvas.bind("<Configure>", lambda event: self.adjust_canvas.itemconfigure(content, width=event.width))
         ttk.Label(left, text="表情输入", style="Sub.TLabel").pack(anchor="w", pady=(0, 10))
         self.meters = {}
         for key, label, low, high in (
@@ -257,7 +307,7 @@ class App:
         self.calibrate_button.pack(side="left")
         self.clear_calibration_button = ttk.Button(calibrate, text="清除校准", command=self.clear_calibration)
         self.clear_calibration_button.pack(side="left", padx=(8, 0))
-        ttk.Label(calibrate, text="自然睁眼、看向正中", style="Muted.TLabel").pack(side="left", padx=(12, 0))
+        ttk.Label(calibrate, text="自然睁眼、看向正中", style="Muted.TLabel", wraplength=100).pack(side="left", padx=(12, 0))
 
         ttk.Label(right, text="动作响应", style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
         orientation_row = ttk.Frame(right)
@@ -268,23 +318,39 @@ class App:
                                              values=tuple(ORIENTATION_CHOICES.values()), width=23, state="readonly")
         self.orientation_combo.pack(side="left", fill="x", expand=True, padx=(6, 0))
         self.orientation_combo.bind("<<ComboboxSelected>>", lambda _: self.changed())
+        self.tracking_choices = {}
+        for key, label, choices in (("tracking_lost", "面捕丢失后", TRACKING_LOST_CHOICES),
+                                    ("blink_sync", "同步眨眼", BLINK_SYNC_CHOICES)):
+            row = ttk.Frame(right)
+            row.pack(fill="x", pady=(0, 6))
+            ttk.Label(row, text=label, width=10).pack(side="left")
+            variable = tk.StringVar(value=choices[getattr(self.settings, key)])
+            combo = ttk.Combobox(row, textvariable=variable, values=tuple(choices.values()), width=20, state="readonly")
+            combo.pack(side="left", fill="x", expand=True, padx=(6, 0))
+            combo.bind("<<ComboboxSelected>>", lambda _: self.changed())
+            self.tracking_choices[key] = variable, combo, choices
+        ttk.Label(right, text="输入：手机 ARKit · 手动灵敏度调节", style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
         self.tuning = {}
+        self.sliders = {}
         for key, label, low, high in (
-            ("head_gain", "头部幅度", 0.1, 3), ("mouth_gain", "张嘴幅度", 0.1, 4),
-            ("blink_gain", "闭眼幅度", 0.1, 3), ("eye_gain", "视线幅度", 0.1, 3),
-            ("smoothing_ms", "整体平滑", 0, 250), ("blink_smoothing_ms", "眨眼平滑", 0, 120),
+            ("blink_gain", "眨眼灵敏度", 0.1, 3), ("eye_open_gain", "睁眼灵敏度", 0.1, 3),
+            ("mouth_gain", "张嘴灵敏度", 0.1, 4), ("smile_gain", "笑容灵敏度", 0.1, 3),
+            ("brow_gain", "眉毛灵敏度", 0.1, 3), ("head_gain", "头部幅度", 0.1, 3),
+            ("eye_gain", "视线幅度", 0.1, 3), ("smoothing_ms", "整体平滑", 0, 250),
+            ("blink_smoothing_ms", "开合平滑", 0, 120),
         ):
             row = ttk.Frame(right)
             row.pack(fill="x", pady=1)
-            ttk.Label(row, text=label, width=9).pack(side="left")
+            ttk.Label(row, text=label, width=10).pack(side="left")
             variable = tk.DoubleVar(value=getattr(self.settings, key))
             number = tk.StringVar()
             ttk.Label(row, textvariable=number, width=7, anchor="e").pack(side="right")
             self.tuning[key] = variable, number
             slider = ttk.Scale(row, from_=low, to=high, variable=variable, length=170, command=lambda _, k=key: self.tune(k))
             slider.pack(side="left", fill="x", expand=True, padx=(6, 10))
+            self.sliders[key] = slider
             self.tune(key)
-        ttk.Label(right, text="越大越平滑；眨眼开合单独调节。", style="Muted.TLabel", wraplength=375).pack(anchor="w", pady=(2, 4))
+        ttk.Label(right, text="睁眼越高越易打开，闭眼越高越易闭合。", style="Muted.TLabel", wraplength=375).pack(anchor="w", pady=(2, 4))
         self.switches = {}
         switches_frame = ttk.Frame(right)
         switches_frame.pack(fill="x")
@@ -295,6 +361,17 @@ class App:
             self.switches[key] = variable
             ttk.Checkbutton(switches_frame, text=text, variable=variable, command=self.changed).grid(
                 row=index // 2, column=index % 2, sticky="w", padx=(0, 8))
+        def scroll_controls(event):
+            self.adjust_canvas.yview_scroll(-int(event.delta / 120) * 3, "units")
+            return "break"
+
+        def bind_scroll(widget):
+            widget.bind("<MouseWheel>", scroll_controls)
+            for child in widget.winfo_children():
+                bind_scroll(child)
+
+        bind_scroll(right)
+        self.adjust_canvas.bind("<MouseWheel>", scroll_controls)
 
     def tune(self, key):
         variable, number = self.tuning[key]
@@ -306,27 +383,61 @@ class App:
         return replace(self.settings, udp_port=int(self.udp_var.get()), vts_port=int(self.vts_var.get()),
                        fps=int(self.fps_var.get()), demo=self.demo_var.get(),
                        phone_orientation=orientation,
+                       **{key: next(value for value, label in choices.items() if label == variable.get())
+                          for key, (variable, _, choices) in self.tracking_choices.items()},
                        **{k: variable.get() for k, (variable, _) in self.tuning.items()},
                        **{k: variable.get() for k, variable in self.switches.items()})
 
     def changed(self):
-        if not self.ready:
+        if not self.ready or self.closing:
             return
         try:
             self.settings = self.read_settings()
             self.engine.update_settings(self.settings)
             if self.save_job:
                 self.root.after_cancel(self.save_job)
+            self.settings_status.set("等待保存…")
             self.save_job = self.root.after(500, self.save)
         except ValueError:
-            pass
+            self.settings_status.set("设置有误，尚未保存")
 
-    def save(self):
+    def save(self, show_error=False) -> bool:
+        if self.save_job:
+            self.root.after_cancel(self.save_job)
         self.save_job = None
         try:
+            self.settings = self.read_settings()
+            self.engine.update_settings(self.settings)
             self.storage.save_settings(self.settings)
-        except (OSError, ValueError) as exc:
+            self.settings_status.set("设置已保存")
+            if show_error:
+                self.engine.log("设置已保存；重开程序后会继续使用当前调节与校准")
+            return True
+        except (OSError, ValueError, TypeError) as exc:
+            self.settings_status.set("保存失败，请查看日志")
             self.engine.log(f"设置保存失败：{exc}")
+            if show_error:
+                messagebox.showerror("保存设置失败", str(exc), parent=self.root)
+            return False
+
+    def restore_defaults(self):
+        defaults = Settings()
+        self.ready = False
+        try:
+            for key, (variable, _) in self.tuning.items():
+                variable.set(getattr(defaults, key))
+                self.tune(key)
+            for key, variable in self.switches.items():
+                variable.set(getattr(defaults, key))
+            for key, (variable, _, choices) in self.tracking_choices.items():
+                variable.set(choices[getattr(defaults, key)])
+        finally:
+            self.ready = True
+        if self.save(show_error=True):
+            with self.engine.lock:
+                self.engine.reset_mapper = True
+            self.settings_status.set("已恢复默认并保存")
+            self.engine.log("灵敏度、平滑、反向与跟踪选项已恢复默认；连接参数、手机方向与校准已保留")
 
     def start(self):
         try:
@@ -412,7 +523,7 @@ class App:
         self.root.after(100, self.tick)
 
     def close(self):
-        self.save()
+        self.save(show_error=True)
         self.engine.stop()
         self.closing = True
         self.root.withdraw()

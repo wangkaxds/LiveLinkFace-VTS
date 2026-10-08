@@ -111,11 +111,16 @@ class Settings:
     vts_port: int = 8001
     fps: int = 60
     smoothing_ms: float = 100.0
-    blink_smoothing_ms: float = 20.0
+    blink_smoothing_ms: float = 8.0
     head_gain: float = 1.0
     mouth_gain: float = 1.5
     blink_gain: float = 1.2
+    eye_open_gain: float = 1.0
     eye_gain: float = 1.0
+    smile_gain: float = 1.0
+    brow_gain: float = 1.0
+    blink_sync: str = "never"
+    tracking_lost: str = "idle"
     phone_orientation: str = "portrait"
     invert_x: bool = False
     invert_y: bool = False
@@ -128,6 +133,10 @@ class Settings:
     blink_zero: tuple[float, float] = (0.0, 0.0)
 
     def validate(self) -> None:
+        if self.blink_sync not in ("never", "always", "when_turning"):
+            raise ValueError("同步眨眼模式无效")
+        if self.tracking_lost not in ("hold", "idle"):
+            raise ValueError("面捕丢失后的模型状态无效")
         if self.phone_orientation not in ("portrait", "landscape_left", "landscape_right", "upside_down"):
             raise ValueError("手机方向必须是竖屏、镜头在左、镜头在右或倒置竖屏")
         for port in (self.udp_port, self.vts_port):
@@ -136,7 +145,8 @@ class Settings:
         if type(self.fps) is not int or not 15 <= self.fps <= 120:
             raise ValueError("发送帧率必须是 15–120 的整数")
         limits = {"smoothing_ms": (0, 250), "blink_smoothing_ms": (0, 120), "head_gain": (0.1, 3),
-                  "mouth_gain": (0.1, 4), "blink_gain": (0.1, 3), "eye_gain": (0.1, 3)}
+                  "mouth_gain": (0.1, 4), "blink_gain": (0.1, 3), "eye_open_gain": (0.1, 3), "eye_gain": (0.1, 3),
+                  "smile_gain": (0.1, 3), "brow_gain": (0.1, 3)}
         for name, (low, high) in limits.items():
             value = getattr(self, name)
             if not isinstance(value, (float, int)) or not math.isfinite(value) or not low <= value <= high:
@@ -207,8 +217,8 @@ class Mapper:
         v = frame.values
         shape = lambda key: clamp(v.get(key, 0.0))
         left_smile, right_smile = shape("MouthSmileLeft"), shape("MouthSmileRight")
-        left_brow = clamp(0.5 + 0.5 * (shape("BrowInnerUp") + shape("BrowOuterUpLeft") - shape("BrowDownLeft")))
-        right_brow = clamp(0.5 + 0.5 * (shape("BrowInnerUp") + shape("BrowOuterUpRight") - shape("BrowDownRight")))
+        left_brow = clamp(0.5 + 0.5 * settings.brow_gain * (shape("BrowInnerUp") + shape("BrowOuterUpLeft") - shape("BrowDownLeft")))
+        right_brow = clamp(0.5 + 0.5 * settings.brow_gain * (shape("BrowInnerUp") + shape("BrowOuterUpRight") - shape("BrowDownRight")))
         yaw, pitch, roll = (v.get(key, 0.0) - settings.head_zero[i]
                             for i, key in enumerate(("HeadYaw", "HeadPitch", "HeadRoll")))
         if settings.phone_orientation == "landscape_left":
@@ -227,19 +237,21 @@ class Mapper:
             result[f"FaceAngle{axis}"] = clamp(-angle if inverse else angle, -30.0, 30.0)
         result.update({
             "MouthOpen": clamp((shape("JawOpen") - 0.3 * shape("MouthClose")) * settings.mouth_gain),
-            "MouthSmile": clamp((left_smile + right_smile - shape("MouthFrownLeft") - shape("MouthFrownRight")) / 2, -1, 1),
+            "MouthSmile": clamp(settings.smile_gain * (left_smile + right_smile - shape("MouthFrownLeft") - shape("MouthFrownRight")) / 2, -1, 1),
             "MouthX": clamp(shape("MouthRight") - shape("MouthLeft"), -1, 1),
             "Brows": (left_brow + right_brow) / 2,
             "BrowLeftY": left_brow, "BrowRightY": right_brow,
             "CheekPuff": shape("CheekPuff"), "TongueOut": shape("TongueOut"),
-            "EyeSmileLeft": shape("CheekSquintLeft"), "EyeSmileRight": shape("CheekSquintRight"),
+            "EyeSmileLeft": clamp(settings.smile_gain * shape("CheekSquintLeft")),
+            "EyeSmileRight": clamp(settings.smile_gain * shape("CheekSquintRight")),
         })
         for target_side in ("Left", "Right"):
             side = ("Right" if target_side == "Left" else "Left") if settings.swap_eyes else target_side
             baseline = settings.blink_zero[0 if side == "Left" else 1]
             # Normalize the remaining range so a calibrated eye can still close fully.
             blink = clamp((shape(f"EyeBlink{side}") - baseline) / (1.0 - baseline))
-            result[f"EyeOpen{target_side}"] = clamp(1.0 - blink * settings.blink_gain + 0.2 * shape(f"EyeWide{side}"))
+            openness = clamp(1.0 - blink * settings.blink_gain + 0.2 * shape(f"EyeWide{side}"))
+            result[f"EyeOpen{target_side}"] = clamp(openness * settings.eye_open_gain)
             gaze_x, gaze_y = eye_direction(v, side)
             offset = 0 if side == "Left" else 2
             gaze_x -= settings.gaze_zero[offset]
@@ -260,6 +272,14 @@ class Mapper:
             if dt is not None and tau > 0 and key in self.previous:
                 alpha = 1.0 - math.exp(-dt / tau)
                 result[key] = self.previous[key] + alpha * (value - self.previous[key])
+        if settings.blink_sync == "always":
+            openness = (result["EyeOpenLeft"] + result["EyeOpenRight"]) / 2
+            result["EyeOpenLeft"] = result["EyeOpenRight"] = openness
+        elif settings.blink_sync == "when_turning" and abs(math.degrees(yaw)) >= 15:
+            # ARKit provides no per-eye confidence. Prefer the more open eye to
+            # suppress false closure from the partially occluded eye when turning.
+            openness = max(result["EyeOpenLeft"], result["EyeOpenRight"])
+            result["EyeOpenLeft"] = result["EyeOpenRight"] = openness
         self.previous = result.copy()
         return result
 
@@ -377,6 +397,7 @@ class Bridge:
         self.threads: list[threading.Thread] = []
         self.udp: socket.socket | None = None
         self.mapper = Mapper()
+        self.held_values: dict[str, float] = {}
         self.reset_mapper = False
         self.selected_source: tuple[str, str, str] | None = None
 
@@ -438,6 +459,7 @@ class Bridge:
         self.udp = udp
         self.stop_event.clear()
         self.mapper.reset()
+        self.held_values = {}
         self.latest = None
         self.selected_source = None
         self.state = Snapshot(phone="模拟数据（非手机）" if self.settings.demo else "等待手机发送 ARKit 数据")
@@ -526,8 +548,9 @@ class Bridge:
         valid = latest is not None and now - latest[1] <= 1.0
         if valid:
             values = self.mapper.map(latest[0], settings, now)
+            self.held_values = values.copy()
         else:
-            values = {}
+            values = self.held_values.copy() if settings.tracking_lost == "hold" else {}
             self.mapper.reset()
         with self.lock:
             self.state.values = values
@@ -560,9 +583,10 @@ class Bridge:
                         values, valid = self._mapped(now)
                         payload = [{"id": key, "value": clamp(value, *ranges[key])}
                                    for key, value in values.items() if key in ranges]
-                        if valid and not payload:
+                        active = valid or bool(values)
+                        if active and not payload:
                             raise RuntimeError("没有可用的 VTS 默认面捕参数")
-                        if valid:
+                        if active:
                             client.request("InjectParameterDataRequest", {
                                 "faceFound": True, "mode": "set", "parameterValues": payload})
                             count += 1
@@ -591,7 +615,8 @@ class Bridge:
                                 self.state.tx_fps = 0.0
                             tick, count = now, 0
                         status = "VTS 已连接 · 模拟数据" if self.settings.demo else (
-                            "VTS 已连接 · 正在驱动模型" if valid else "VTS 已连接 · 等待手机数据")
+                            "VTS 已连接 · 正在驱动模型" if valid else (
+                                "VTS 已连接 · 保持上次动作（手机数据中断）" if active else "VTS 已连接 · 等待手机数据"))
                         self._status(status, True)
                         deadline = max(deadline + 1 / self.settings.fps, time.monotonic())
                         self.stop_event.wait(max(0, deadline - time.monotonic()))

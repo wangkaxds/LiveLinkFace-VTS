@@ -101,6 +101,59 @@ class ProtocolTests(unittest.TestCase):
 
 
 class MappingTests(unittest.TestCase):
+    def test_smile_and_brow_sensitivity_preserve_neutral_and_amplify_expressions(self):
+        settings = Settings(smile_gain=2, brow_gain=2)
+        neutral = Mapper().map(frame(), settings, 1)
+        self.assertEqual(neutral["Brows"], 0.5)
+        self.assertEqual(neutral["MouthSmile"], 0)
+        expression = frame({"MouthSmileLeft": 0.3, "MouthSmileRight": 0.3,
+                            "CheekSquintLeft": 0.4, "BrowOuterUpLeft": 0.4, "BrowDownRight": 0.4})
+        result = Mapper().map(expression, settings, 1)
+        self.assertAlmostEqual(result["MouthSmile"], 0.6)
+        self.assertAlmostEqual(result["EyeSmileLeft"], 0.8)
+        self.assertAlmostEqual(result["BrowLeftY"], 0.9)
+        self.assertAlmostEqual(result["BrowRightY"], 0.1)
+        self.assertEqual(result["MouthOpen"], 0)
+        extreme = Mapper().map(frame({"MouthFrownLeft": 1, "MouthFrownRight": 1,
+                                     "BrowDownLeft": 1, "BrowOuterUpRight": 1}), settings, 1)
+        self.assertEqual(extreme["MouthSmile"], -1)
+        self.assertEqual(extreme["BrowLeftY"], 0)
+        self.assertEqual(extreme["BrowRightY"], 1)
+
+    def test_blink_sync_modes_and_landscape_turn_use_physical_head_rotation(self):
+        wink = {"EyeBlinkLeft": 1, "EyeBlinkRight": 0}
+        separate = Mapper().map(frame(wink), Settings(blink_sync="never"), 1)
+        self.assertEqual((separate["EyeOpenLeft"], separate["EyeOpenRight"]), (0, 1))
+        together = Mapper().map(frame(wink), Settings(blink_sync="always"), 1)
+        self.assertEqual((together["EyeOpenLeft"], together["EyeOpenRight"]), (0.5, 0.5))
+        mapper = Mapper()
+        settings = Settings(blink_sync="when_turning", phone_orientation="landscape_left", head_gain=0.1)
+        straight = mapper.map(frame(wink), settings, 0)
+        self.assertEqual((straight["EyeOpenLeft"], straight["EyeOpenRight"]), (0, 1))
+        turned = mapper.map(frame(dict(wink, HeadPitch=math.radians(20))), settings, 0.01)
+        self.assertEqual((turned["EyeOpenLeft"], turned["EyeOpenRight"]), (1, 1))
+        closed = Mapper().map(frame({"EyeBlinkLeft": 1, "EyeBlinkRight": 1, "HeadPitch": math.radians(20)}), settings, 1)
+        self.assertEqual((closed["EyeOpenLeft"], closed["EyeOpenRight"]), (0, 0))
+
+    def test_eye_open_sensitivity_amplifies_opening_but_keeps_full_closure(self):
+        partially_open = frame({"EyeBlinkLeft": 0.75, "EyeBlinkRight": 1})
+        low = Mapper().map(partially_open, Settings(blink_gain=1, eye_open_gain=1), 1)
+        high = Mapper().map(partially_open, Settings(blink_gain=1, eye_open_gain=2), 1)
+        self.assertAlmostEqual(low["EyeOpenLeft"], 0.25)
+        self.assertAlmostEqual(high["EyeOpenLeft"], 0.5)
+        self.assertEqual(high["EyeOpenRight"], 0)
+        fully_open = Mapper().map(frame(), Settings(eye_open_gain=3), 1)
+        self.assertEqual(fully_open["EyeOpenLeft"], 1)
+
+    def test_open_and_closed_sensitivity_work_with_calibration_and_eye_swap(self):
+        settings = Settings(blink_zero=(0.4, 0.2), blink_gain=1.5, eye_open_gain=2, swap_eyes=True)
+        result = Mapper().map(frame({"EyeBlinkLeft": 0.7, "EyeBlinkRight": 0.2}), settings, 1)
+        self.assertEqual(result["EyeOpenLeft"], 1)
+        self.assertAlmostEqual(result["EyeOpenRight"], 0.5)
+        closed = Mapper().map(frame({"EyeBlinkLeft": 1, "EyeBlinkRight": 1}), settings, 1)
+        self.assertEqual(closed["EyeOpenLeft"], 0)
+        self.assertEqual(closed["EyeOpenRight"], 0)
+
     def test_wink_and_mouth(self):
         result = Mapper().map(frame({"EyeBlinkLeft": 1, "JawOpen": 0.5}), Settings(smoothing_ms=0), 1)
         self.assertEqual(result["EyeOpenLeft"], 0)
@@ -258,6 +311,23 @@ class OrientationTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
+    def test_hold_on_tracking_loss_freezes_last_pose_without_claiming_a_live_frame(self):
+        engine = Bridge(Settings(tracking_lost="hold"), self.storage)
+        now = time.monotonic()
+        before_phone, valid = engine._mapped(now)
+        self.assertEqual(before_phone, {})
+        self.assertFalse(valid)
+        engine.latest = self.neutral, now
+        live, valid = engine._mapped(now)
+        self.assertTrue(valid)
+        held, valid = engine._mapped(now + 2)
+        self.assertFalse(valid)
+        self.assertEqual(held, live)
+        engine.update_settings(replace(engine.settings, tracking_lost="idle"))
+        idle, valid = engine._mapped(now + 3)
+        self.assertEqual(idle, {})
+        self.assertFalse(valid)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.storage = Storage(Path(self.directory.name))
@@ -374,6 +444,34 @@ class CalibrationTests(unittest.TestCase):
 
 
 class StorageTests(unittest.TestCase):
+    def test_tracking_options_and_expression_gains_persist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            configured = Settings(blink_sync="when_turning", tracking_lost="hold", smile_gain=2, brow_gain=1.5)
+            storage.save_settings(configured)
+            loaded = storage.load_settings()
+            for field in ("blink_sync", "tracking_lost", "smile_gain", "brow_gain"):
+                self.assertEqual(getattr(loaded, field), getattr(configured, field))
+            for field, value in (("blink_sync", "invalid"), ("tracking_lost", "invalid"),
+                                 ("smile_gain", 4), ("brow_gain", math.nan)):
+                with self.assertRaises(ValueError):
+                    replace(configured, **{field: value}).validate()
+
+    def test_eye_open_sensitivity_persists_and_old_settings_preserve_opening(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            (storage.directory / "settings.json").write_text('{"blink_gain": 1.5}', encoding="utf-8")
+            loaded = storage.load_settings()
+            self.assertEqual(loaded.eye_open_gain, 1)
+            self.assertEqual(loaded.blink_gain, 1.5)
+            result = Mapper().map(frame({"EyeBlinkLeft": 0.5}), loaded, 1)
+            self.assertEqual(result["EyeOpenLeft"], 0.25)
+            storage.save_settings(replace(loaded, eye_open_gain=2))
+            self.assertEqual(storage.load_settings().eye_open_gain, 2)
+            for invalid in (0, 4, math.nan, math.inf):
+                with self.assertRaises(ValueError):
+                    replace(loaded, eye_open_gain=invalid).validate()
+
     def test_eyelid_calibration_persists_and_legacy_settings_keep_the_old_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory))
@@ -396,7 +494,7 @@ class StorageTests(unittest.TestCase):
             (storage.directory / "settings.json").write_text('{"smoothing_ms": 55}', encoding="utf-8")
             loaded = storage.load_settings()
             self.assertEqual(loaded.smoothing_ms, 55)
-            self.assertEqual(loaded.blink_smoothing_ms, 20)
+            self.assertEqual(loaded.blink_smoothing_ms, 8)
             storage.save_settings(replace(loaded, blink_smoothing_ms=40))
             self.assertEqual(storage.load_settings().blink_smoothing_ms, 40)
             for invalid in (-1, 121, math.nan, math.inf):
@@ -582,6 +680,31 @@ class NetworkTests(unittest.TestCase):
             until(lambda: engine.snapshot().values == {}, seconds=3)
             until(lambda: mock.has_injection(lambda d: not d["faceFound"] and d["parameterValues"] == []))
             self.assertIn("中断", engine.snapshot().phone)
+            engine.stop()
+            until(lambda: not engine.running)
+
+    def test_tracking_loss_hold_continues_injection_until_idle_is_selected(self):
+        with MockVTS() as mock:
+            engine = self.engine(mock, demo=False)
+            engine.update_settings(replace(engine.settings, tracking_lost="hold"))
+            engine.start()
+            until(lambda: engine.snapshot().connected)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                sender.sendto(packet({"JawOpen": 0.4}), ("127.0.0.1", engine.settings.udp_port))
+            until(lambda: engine.snapshot().sent >= 2)
+            before = engine.snapshot()
+            with engine.lock:
+                engine.latest = engine.latest[0], time.monotonic() - 2
+                engine.state.last_packet = time.monotonic() - 2
+            until(lambda: "保持上次动作" in engine.snapshot().vts and engine.snapshot().sent >= before.sent + 2)
+            self.assertEqual(engine.snapshot().values, before.values)
+            self.assertIn("中断", engine.snapshot().phone)
+            with mock.lock:
+                self.assertTrue(mock.injections[-1]["faceFound"])
+                self.assertTrue(mock.injections[-1]["parameterValues"])
+            engine.update_settings(replace(engine.settings, tracking_lost="idle"))
+            until(lambda: engine.snapshot().values == {} and engine.snapshot().tx_fps == 0)
+            until(lambda: mock.has_injection(lambda d: not d["faceFound"] and not d["parameterValues"]))
             engine.stop()
             until(lambda: not engine.running)
 
