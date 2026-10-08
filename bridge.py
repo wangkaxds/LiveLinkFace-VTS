@@ -115,6 +115,7 @@ class Settings:
     mouth_gain: float = 1.5
     blink_gain: float = 1.2
     eye_gain: float = 1.0
+    phone_orientation: str = "portrait"
     invert_x: bool = False
     invert_y: bool = False
     invert_z: bool = False
@@ -125,6 +126,8 @@ class Settings:
     gaze_zero: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def validate(self) -> None:
+        if self.phone_orientation not in ("portrait", "landscape_left", "landscape_right", "upside_down"):
+            raise ValueError("手机方向必须是竖屏、镜头在左、镜头在右或倒置竖屏")
         for port in (self.udp_port, self.vts_port):
             if type(port) is not int or not 1 <= port <= 65535:
                 raise ValueError("端口必须是 1–65535 的整数")
@@ -201,12 +204,21 @@ class Mapper:
         left_smile, right_smile = shape("MouthSmileLeft"), shape("MouthSmileRight")
         left_brow = clamp(0.5 + 0.5 * (shape("BrowInnerUp") + shape("BrowOuterUpLeft") - shape("BrowDownLeft")))
         right_brow = clamp(0.5 + 0.5 * (shape("BrowInnerUp") + shape("BrowOuterUpRight") - shape("BrowDownRight")))
+        yaw, pitch, roll = (v.get(key, 0.0) - settings.head_zero[i]
+                            for i, key in enumerate(("HeadYaw", "HeadPitch", "HeadRoll")))
+        if settings.phone_orientation == "landscape_left":
+            yaw, pitch = pitch, -yaw
+        elif settings.phone_orientation == "landscape_right":
+            yaw, pitch = -pitch, yaw
+        elif settings.phone_orientation == "upside_down":
+            yaw, pitch = -yaw, -pitch
+        if settings.phone_orientation != "portrait":
+            # Sideways/upside-down poses can cross the -pi/pi roll boundary.
+            roll = math.remainder(roll, 2 * math.pi)
         result = {}
-        for i, (axis, source, inverse) in enumerate(zip(
-            "XYZ", ("HeadYaw", "HeadPitch", "HeadRoll"),
-            (settings.invert_x, settings.invert_y, settings.invert_z)
-        )):
-            angle = math.degrees(v.get(source, 0.0) - settings.head_zero[i]) * settings.head_gain
+        for axis, value, inverse in zip("XYZ", (yaw, pitch, roll),
+                                       (settings.invert_x, settings.invert_y, settings.invert_z)):
+            angle = math.degrees(value) * settings.head_gain
             result[f"FaceAngle{axis}"] = clamp(-angle if inverse else angle, -30.0, 30.0)
         result.update({
             "MouthOpen": clamp((shape("JawOpen") - 0.3 * shape("MouthClose")) * settings.mouth_gain),
@@ -378,6 +390,9 @@ class Bridge:
     def update_settings(self, settings: Settings) -> None:
         settings.validate()
         with self.lock:
+            if settings.phone_orientation != self.settings.phone_orientation:
+                self.reset_mapper = True
+                self.log("手机方向补偿已更改；摆好手机后请点击「头部与视线归零」")
             self.settings = settings
 
     def calibrate(self) -> Settings:

@@ -14,7 +14,13 @@ from tkinter import messagebox, ttk
 
 from bridge import Bridge, Settings, Storage
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
+ORIENTATION_CHOICES = {
+    "portrait": "竖屏 / 不补偿",
+    "landscape_left": "横屏 · 镜头在左",
+    "landscape_right": "横屏 · 镜头在右",
+    "upside_down": "倒置竖屏 · 镜头在下",
+}
 
 
 def local_addresses() -> list[str]:
@@ -43,6 +49,15 @@ HELP = """第一次接入
 4. 正对手机，保持普通坐姿并目视正中，点击「头部与视线归零」。
    当前头部姿势和左右眼视线会成为正中位置；眨眼开合不受归零影响。
    然后根据自己的模型调头部、嘴巴和眨眼幅度。
+
+横放手机（旧版横屏面捕适配）
+
+• 在「动作响应」的「手机方向」中，按面向手机屏幕时的前置镜头位置选择。
+  镜头在你的左边选「横屏 · 镜头在左」，右边选「横屏 · 镜头在右」。
+• 手机摆好后，目视正中，重新点击「头部与视线归零」。
+  改变摆放方向或移动手机后需要再次归零。
+• 若手机发送的数据方向本身已正确，保留「竖屏 / 不补偿」。
+  眨眼、嘴巴和眼球视线按脸部方向处理；手机方向选项补偿头部转动轴。
 
 接不上时
 
@@ -233,6 +248,14 @@ class App:
         ttk.Button(calibrate, text="清除归零", command=self.clear_zero).pack(side="left", padx=(8, 0))
 
         ttk.Label(right, text="动作响应", style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
+        orientation_row = ttk.Frame(right)
+        orientation_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(orientation_row, text="手机方向", width=9).pack(side="left")
+        self.orientation_var = tk.StringVar(value=ORIENTATION_CHOICES[self.settings.phone_orientation])
+        self.orientation_combo = ttk.Combobox(orientation_row, textvariable=self.orientation_var,
+                                             values=tuple(ORIENTATION_CHOICES.values()), width=23, state="readonly")
+        self.orientation_combo.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.orientation_combo.bind("<<ComboboxSelected>>", lambda _: self.changed())
         self.tuning = {}
         for key, label, low, high in (
             ("head_gain", "头部幅度", 0.1, 3), ("mouth_gain", "张嘴幅度", 0.1, 4),
@@ -251,12 +274,15 @@ class App:
             self.tune(key)
         ttk.Label(right, text="平滑越低，响应越快；眨眼有独立的快速平滑。", style="Muted.TLabel", wraplength=375).pack(anchor="w", pady=(2, 4))
         self.switches = {}
-        for key, text in (("invert_x", "左右转头反向"), ("invert_y", "抬头低头反向"),
-                          ("invert_z", "头部倾斜反向"), ("swap_eyes", "交换左右眼"),
-                          ("invert_gaze", "左右视线反向")):
+        switches_frame = ttk.Frame(right)
+        switches_frame.pack(fill="x")
+        for index, (key, text) in enumerate((("invert_x", "左右转头反向"), ("invert_y", "抬头低头反向"),
+                                             ("invert_z", "头部倾斜反向"), ("swap_eyes", "交换左右眼"),
+                                             ("invert_gaze", "左右视线反向"))):
             variable = tk.BooleanVar(value=getattr(self.settings, key))
             self.switches[key] = variable
-            ttk.Checkbutton(right, text=text, variable=variable, command=self.changed).pack(anchor="w")
+            ttk.Checkbutton(switches_frame, text=text, variable=variable, command=self.changed).grid(
+                row=index // 2, column=index % 2, sticky="w", padx=(0, 8))
 
     def tune(self, key):
         variable, number = self.tuning[key]
@@ -264,8 +290,10 @@ class App:
         self.changed()
 
     def read_settings(self) -> Settings:
+        orientation = next(key for key, label in ORIENTATION_CHOICES.items() if label == self.orientation_var.get())
         return replace(self.settings, udp_port=int(self.udp_var.get()), vts_port=int(self.vts_var.get()),
                        fps=int(self.fps_var.get()), demo=self.demo_var.get(),
+                       phone_orientation=orientation,
                        **{k: variable.get() for k, (variable, _) in self.tuning.items()},
                        **{k: variable.get() for k, variable in self.switches.items()})
 

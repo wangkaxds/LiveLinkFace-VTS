@@ -147,6 +147,80 @@ class MappingTests(unittest.TestCase):
         self.assertTrue(-30 <= result["FaceAngleX"] <= 30)
 
 
+class OrientationTests(unittest.TestCase):
+    def test_left_landscape_restores_yaw_pitch_and_keeps_face_local_gaze(self):
+        encoded = frame({"HeadYaw": math.radians(-8), "HeadPitch": math.radians(12),
+                         "HeadRoll": math.radians(95), "EyeLookOutLeft": 0.3,
+                         "EyeLookDownLeft": 0.2, "EyeBlinkRight": 1, "JawOpen": 0.4})
+        settings = Settings(smoothing_ms=0, phone_orientation="landscape_left", head_zero=(0, 0, math.pi / 2))
+        result = Mapper().map(encoded, settings, 1)
+        self.assertAlmostEqual(result["FaceAngleX"], 12)
+        self.assertAlmostEqual(result["FaceAngleY"], 8)
+        self.assertAlmostEqual(result["FaceAngleZ"], 5)
+        self.assertAlmostEqual(result["EyeLeftX"], 0.3)
+        self.assertAlmostEqual(result["EyeLeftY"], -0.2)
+        self.assertEqual(result["EyeOpenRight"], 0)
+        self.assertAlmostEqual(result["MouthOpen"], 0.6)
+
+    def test_right_landscape_restores_yaw_pitch_before_gain_and_axis_inversion(self):
+        encoded = frame({"HeadYaw": math.radians(8), "HeadPitch": math.radians(-12),
+                         "HeadRoll": math.radians(-85)})
+        settings = Settings(smoothing_ms=0, phone_orientation="landscape_right", head_gain=2,
+                            head_zero=(0, 0, -math.pi / 2), invert_x=True, invert_y=True, invert_z=True)
+        result = Mapper().map(encoded, settings, 1)
+        self.assertAlmostEqual(result["FaceAngleX"], -24)
+        self.assertAlmostEqual(result["FaceAngleY"], -16)
+        self.assertAlmostEqual(result["FaceAngleZ"], -10)
+
+    def test_upside_down_handles_the_roll_boundary_without_a_full_turn_jump(self):
+        result = Mapper().map(frame({"HeadYaw": math.radians(-12), "HeadPitch": math.radians(-8),
+                                     "HeadRoll": math.radians(-179)}),
+                              Settings(smoothing_ms=0, phone_orientation="upside_down",
+                                       head_zero=(0, 0, math.radians(179))), 1)
+        self.assertAlmostEqual(result["FaceAngleX"], 12)
+        self.assertAlmostEqual(result["FaceAngleY"], 8)
+        self.assertAlmostEqual(result["FaceAngleZ"], 2)
+
+    def test_all_orientations_preserve_calibration_and_eye_side_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            neutral = frame({"HeadYaw": 0.2, "HeadPitch": 0.3, "HeadRoll": 1.5,
+                             "EyeLookOutLeft": 0.3, "EyeLookDownLeft": 0.2,
+                             "EyeLookInRight": 0.4, "EyeLookUpRight": 0.1, "EyeBlinkLeft": 1})
+            for orientation in ("portrait", "landscape_left", "landscape_right", "upside_down"):
+                engine = Bridge(Settings(smoothing_ms=0, phone_orientation=orientation,
+                                         swap_eyes=True, invert_gaze=True), Storage(Path(directory)))
+                engine.latest = neutral, time.monotonic()
+                engine.calibrate()
+                mapped, _ = engine._mapped(time.monotonic())
+                for key in ("FaceAngleX", "FaceAngleY", "FaceAngleZ", "EyeLeftX", "EyeLeftY", "EyeRightX", "EyeRightY"):
+                    self.assertAlmostEqual(mapped[key], 0)
+                self.assertEqual(mapped["EyeOpenRight"], 0)
+
+    def test_orientation_change_resets_smoothing_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            engine = Bridge(Settings(smoothing_ms=250), Storage(Path(directory)))
+            now = time.monotonic()
+            engine.latest = frame({"HeadYaw": math.radians(-8), "HeadPitch": math.radians(12)}), now
+            engine._mapped(now)
+            engine.update_settings(replace(engine.settings, phone_orientation="landscape_left"))
+            mapped, _ = engine._mapped(now + 0.001)
+            self.assertAlmostEqual(mapped["FaceAngleX"], 12)
+            self.assertAlmostEqual(mapped["FaceAngleY"], 8)
+
+    def test_orientation_persists_and_legacy_settings_use_no_compensation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory))
+            (storage.directory / "settings.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(storage.load_settings().phone_orientation, "portrait")
+            storage.save_settings(Settings(phone_orientation="landscape_left"))
+            self.assertEqual(storage.load_settings().phone_orientation, "landscape_left")
+
+    def test_unknown_orientation_is_rejected(self):
+        for orientation in ("auto", "invalid", None, 90):
+            with self.assertRaises(ValueError):
+                Settings(phone_orientation=orientation).validate()
+
+
 class CalibrationTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
